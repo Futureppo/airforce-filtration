@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  airforce-filtration:
+    build: .
+    container_name: airforce-filtration
+    restart: unless-stopped
+    ports:
+      - "6777:6777"
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "--spider", "http://localhost:6777/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
