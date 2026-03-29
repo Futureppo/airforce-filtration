@@ -14,13 +14,11 @@ import (
 	"time"
 )
 
-// Handler 请求处理器
 type Handler struct {
 	config *Config
 	client *http.Client
 }
 
-// NewHandler 创建请求处理器，初始化 HTTP 客户端及代理配置
 func NewHandler(cfg *Config) *Handler {
 	transport := &http.Transport{
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: false},
@@ -48,7 +46,6 @@ func NewHandler(cfg *Config) *Handler {
 	}
 }
 
-// HandleChatCompletions 处理 /v1/chat/completions 请求
 func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error": {"message": "Method not allowed", "type": "invalid_request_error"}}`, http.StatusMethodNotAllowed)
@@ -63,7 +60,6 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 	defer r.Body.Close()
 
-	// 直接透传来自 NewAPI 的 Authorization header
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		http.Error(w, `{"error": {"message": "Missing Authorization header", "type": "invalid_request_error"}}`, http.StatusUnauthorized)
@@ -81,7 +77,6 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	keyDisplay := maskKey(authHeader)
 	var lastErr error
 
-	// 重试循环（429 时使用同一个 key 重试）
 	for attempt := 0; attempt <= h.config.MaxRetries; attempt++ {
 		if attempt > 0 {
 			log.Printf("[重试] 第 %d 次重试 | Key: %s", attempt, keyDisplay)
@@ -110,7 +105,6 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 
-		// 429 限流需要重试
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("上游返回 429 Too Many Requests")
@@ -118,7 +112,6 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 
-		// 非 200 状态码直接透传
 		if resp.StatusCode != http.StatusOK {
 			log.Printf("[上游] 返回状态码: %d", resp.StatusCode)
 			h.proxyRawResponse(w, resp)
@@ -133,14 +126,12 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 所有重试均失败
 	log.Printf("[错误] 所有重试均失败: %v", lastErr)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
 	fmt.Fprintf(w, `{"error": {"message": "All retries failed: %s", "type": "upstream_error"}}`, lastErr)
 }
 
-// handleNonStreamResponse 处理非流式响应
 func (h *Handler) handleNonStreamResponse(w http.ResponseWriter, resp *http.Response) {
 	defer resp.Body.Close()
 
@@ -169,7 +160,6 @@ func (h *Handler) handleNonStreamResponse(w http.ResponseWriter, resp *http.Resp
 	log.Printf("[完成] 非流式响应已返回，原始大小: %d，过滤后: %d", len(body), len(filtered))
 }
 
-// SSEChunk SSE 数据块的 JSON 结构
 type SSEChunk struct {
 	ID      string      `json:"id"`
 	Object  string      `json:"object"`
@@ -179,36 +169,32 @@ type SSEChunk struct {
 	Usage   *SSEUsage   `json:"usage,omitempty"`
 }
 
-// SSEChoice SSE 数据块中的选项
 type SSEChoice struct {
 	Index        int      `json:"index"`
 	Delta        SSEDelta `json:"delta"`
 	FinishReason *string  `json:"finish_reason"`
 }
 
-// SSEDelta SSE 数据块中的增量内容
 type SSEDelta struct {
 	Role    string `json:"role,omitempty"`
 	Content string `json:"content,omitempty"`
 }
 
-// SSEUsage Token 用量信息
 type SSEUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// bufferedChunk 缓冲区中的数据块记录
 type bufferedChunk struct {
-	rawLine    string // 原始 SSE 行（含 "data: " 前缀）
-	content    string // delta.content 内容
-	contentLen int    // content 的字符长度
-	isStop     bool   // 是否为 finish_reason=stop
-	isUsage    bool   // 是否为 usage 块（空 choices）
+	rawLine    string
+	content    string
+	contentLen int
+	isStop     bool
+	isUsage    bool
 }
 
-// handleStreamResponse 处理流式响应，使用尾部缓冲策略过滤广告
+// handleStreamResponse 使用尾部缓冲策略过滤流式响应中的广告
 func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Response) {
 	defer resp.Body.Close()
 
@@ -232,18 +218,12 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 
 	for scanner.Scan() {
 		line := scanner.Text()
-
-		if line == "" {
-			continue
-		}
-
-		if !strings.HasPrefix(line, "data: ") {
+		if line == "" || !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 
 		data := strings.TrimPrefix(line, "data: ")
 
-		// 流结束，处理缓冲区并发送 [DONE]
 		if data == "[DONE]" {
 			h.flushFilteredBuffer(w, flusher, buffer)
 			fmt.Fprintf(w, "data: [DONE]\n\n")
@@ -261,7 +241,6 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 			front := buffer[0]
 			buffer = buffer[1:]
 			bufferContentLen -= front.contentLen
-
 			fmt.Fprintf(w, "%s\n\n", front.rawLine)
 			flusher.Flush()
 		}
@@ -271,17 +250,13 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 		log.Printf("[错误] 读取上游流失败: %v", err)
 	}
 
-	// 流异常结束时也释放缓冲区
 	if len(buffer) > 0 {
 		h.flushFilteredBuffer(w, flusher, buffer)
 	}
 }
 
-// parseSSEChunk 解析 SSE 数据行为 bufferedChunk
 func parseSSEChunk(rawLine, data string) bufferedChunk {
-	chunk := bufferedChunk{
-		rawLine: rawLine,
-	}
+	chunk := bufferedChunk{rawLine: rawLine}
 
 	var parsed SSEChunk
 	if err := json.Unmarshal([]byte(data), &parsed); err != nil {
@@ -298,11 +273,9 @@ func parseSSEChunk(rawLine, data string) bufferedChunk {
 	if parsed.Choices[0].FinishReason != nil && *parsed.Choices[0].FinishReason == "stop" {
 		chunk.isStop = true
 	}
-
 	return chunk
 }
 
-// flushFilteredBuffer 过滤缓冲区中的广告内容后发送给客户端
 func (h *Handler) flushFilteredBuffer(w http.ResponseWriter, flusher http.Flusher, buffer []bufferedChunk) {
 	if len(buffer) == 0 {
 		return
@@ -346,7 +319,6 @@ func (h *Handler) flushFilteredBuffer(w http.ResponseWriter, flusher http.Flushe
 		}
 	}
 
-	// 发送 stop 和 usage 块
 	for _, chunk := range buffer {
 		if chunk.isStop || chunk.isUsage {
 			fmt.Fprintf(w, "%s\n\n", chunk.rawLine)
@@ -355,10 +327,8 @@ func (h *Handler) flushFilteredBuffer(w http.ResponseWriter, flusher http.Flushe
 	}
 }
 
-// proxyRawResponse 直接透传上游响应
 func (h *Handler) proxyRawResponse(w http.ResponseWriter, resp *http.Response) {
 	defer resp.Body.Close()
-
 	for key, values := range resp.Header {
 		for _, v := range values {
 			w.Header().Add(key, v)
@@ -368,7 +338,6 @@ func (h *Handler) proxyRawResponse(w http.ResponseWriter, resp *http.Response) {
 	io.Copy(w, resp.Body)
 }
 
-// maskKey 对 Authorization header 脱敏用于日志输出
 func maskKey(authHeader string) string {
 	key := strings.TrimPrefix(authHeader, "Bearer ")
 	if len(key) <= 14 {

@@ -7,17 +7,15 @@ import (
 	"strings"
 )
 
-// Config 全局配置结构
 type Config struct {
-	ProxyURL     string   // HTTP 代理地址，例如 http://ip:port
-	UpstreamURL  string   // 上游 API 地址
-	ListenPort   string   // 监听端口
-	MaxRetries   int      // 429 错误时最大重试次数
-	AdKeywords   []string // 广告过滤关键词列表
-	AdBufferSize int      // 流式响应尾部缓冲区大小（字符数）
+	ProxyURL     string
+	UpstreamURL  string
+	ListenPort   string
+	MaxRetries   int
+	AdKeywords   []string
+	AdBufferSize int
 }
 
-// 默认广告关键词
 var defaultAdKeywords = []string{
 	"Need proxies cheaper than the market?",
 	"op.wtf",
@@ -25,7 +23,6 @@ var defaultAdKeywords = []string{
 	"discord.gg/airforce",
 }
 
-// LoadConfig 从环境变量加载配置
 func LoadConfig() *Config {
 	cfg := &Config{}
 
@@ -39,7 +36,7 @@ func LoadConfig() *Config {
 	}
 	cfg.MaxRetries = maxRetries
 
-	// 广告关键词（可自定义，用 | 分隔，留空则使用默认）
+	// 广告关键词可通过 AD_KEYWORDS 环境变量自定义，用 | 分隔
 	adStr := getEnv("AD_KEYWORDS", "")
 	if adStr != "" {
 		for _, kw := range strings.Split(adStr, "|") {
@@ -58,23 +55,23 @@ func LoadConfig() *Config {
 	}
 	cfg.AdBufferSize = bufSize
 
-	log.Printf("[配置] 上游地址: %s", cfg.UpstreamURL)
-	log.Printf("[配置] 监听端口: %s", cfg.ListenPort)
-	log.Printf("[配置] 最大重试次数: %d", cfg.MaxRetries)
-	if cfg.ProxyURL != "" {
-		log.Printf("[配置] HTTP 代理: %s", cfg.ProxyURL)
-	} else {
-		log.Printf("[配置] HTTP 代理: 未配置（直连）")
-	}
+	log.Printf("[配置] 上游: %s | 端口: %s | 重试: %d | 代理: %s",
+		cfg.UpstreamURL, cfg.ListenPort, cfg.MaxRetries, orDefault(cfg.ProxyURL, "直连"))
 	log.Printf("[配置] 广告关键词: %v", cfg.AdKeywords)
 
 	return cfg
 }
 
-// getEnv 获取环境变量，不存在则返回默认值
 func getEnv(key, defaultVal string) string {
 	if val := os.Getenv(key); val != "" {
 		return val
 	}
 	return defaultVal
+}
+
+func orDefault(val, def string) string {
+	if val == "" {
+		return def
+	}
+	return val
 }

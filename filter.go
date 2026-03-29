@@ -5,7 +5,6 @@ import (
 	"strings"
 )
 
-// FilterAdContent 从响应 content 中过滤广告内容（按行匹配关键词并移除）
 func FilterAdContent(content string, keywords []string) string {
 	if len(keywords) == 0 {
 		return content
@@ -21,11 +20,9 @@ func FilterAdContent(content string, keywords []string) string {
 	}
 
 	result := strings.Join(filtered, "\n")
-	result = strings.TrimRight(result, "\n ")
-	return result
+	return strings.TrimRight(result, "\n ")
 }
 
-// FilterNonStreamResponse 过滤非流式响应体中的广告
 func FilterNonStreamResponse(body []byte, keywords []string) ([]byte, error) {
 	var resp map[string]interface{}
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -61,11 +58,9 @@ func FilterNonStreamResponse(body []byte, keywords []string) ([]byte, error) {
 	if !modified {
 		return body, nil
 	}
-
 	return json.Marshal(resp)
 }
 
-// containsAnyKeyword 检查文本是否包含任意一个关键词（大小写不敏感）
 func containsAnyKeyword(text string, keywords []string) bool {
 	lower := strings.ToLower(text)
 	for _, kw := range keywords {
