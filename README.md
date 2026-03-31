@@ -1,25 +1,7 @@
 # Airforce Filtration Proxy
 
-API 请求过滤代理，用于过滤 [api.airforce](https://api.airforce) 响应中的广告内容。
+API 请求过滤代理&负载均衡。
 
-## 功能
-
-- **透传 Key** — 直接透传来自 NewAPI 的 Authorization header，不管理任何 Key
-- **HTTP 代理池** — 支持配置 HTTP 代理发送上游请求
-- **429 自动重试** — 遇到限流/网络错误自动重试，支持自定义重试次数
-- **广告过滤** — 自动过滤上游响应中的广告内容（支持流式和非流式）
-- **Docker 部署** — 支持 Docker / Docker Compose 一键部署
-
-## 架构
-
-```
-用户 → NewAPI（管理Key + 轮询） → 本代理(:6777) → [HTTP代理] → api.airforce
-                                       ↑
-                                 429重试 + 广告过滤
-```
-
-- Key 全部由 NewAPI 管理，本代理仅透传请求中的 Authorization header
-- 本代理不存储、不管理任何 Key
 
 ## 快速开始
 
@@ -42,7 +24,7 @@ LISTEN_PORT=6777
 MAX_RETRIES=3
 ```
 
-### 2. Docker Compose 部署（推荐）
+### 2. Docker Compose 部署
 
 ```bash
 docker compose up -d
@@ -51,10 +33,7 @@ docker compose up -d
 ### 3. 直接运行
 
 ```bash
-# 编译
 go build -o airforce-filtration .
-
-# 运行
 ./airforce-filtration
 ```
 
@@ -65,13 +44,6 @@ go build -o airforce-filtration .
 ```
 http://your-server-ip:6777
 ```
-
-### 接口
-
-| 路径                   | 方法 | 说明                            |
-| ---------------------- | ---- | ------------------------------- |
-| `/v1/chat/completions` | POST | Chat Completions（OpenAI 兼容） |
-| `/health`              | GET  | 健康检查                        |
 
 ## 配置说明
 
@@ -88,4 +60,4 @@ http://your-server-ip:6777
 
 ## License
 
-MIT
+MIT License - see the [LICENSE](LICENSE) file for details.
