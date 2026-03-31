@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,14 +28,16 @@ func NewHandler(cfg *Config) *Handler {
 		IdleConnTimeout:     90 * time.Second,
 	}
 
-	if cfg.ProxyURL != "" {
-		proxyURL, err := url.Parse(cfg.ProxyURL)
-		if err != nil {
-			log.Printf("[警告] 代理地址解析失败: %v，将直连", err)
-		} else {
-			transport.Proxy = http.ProxyURL(proxyURL)
-			log.Printf("[代理] 已配置 HTTP 代理: %s", cfg.ProxyURL)
+	if len(cfg.Proxies) > 0 {
+		var proxyIndex uint64
+		transport.Proxy = func(req *http.Request) (*url.URL, error) {
+			idx := atomic.AddUint64(&proxyIndex, 1)
+			proxyURL := cfg.Proxies[(idx-1)%uint64(len(cfg.Proxies))]
+			return proxyURL, nil
 		}
+		log.Printf("[代理] 已启用 HTTP 代理池，共 %d 个节点", len(cfg.Proxies))
+	} else {
+		log.Printf("[代理] 未配置代理，将直连")
 	}
 
 	return &Handler{
@@ -75,61 +78,75 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	keyDisplay := maskKey(authHeader)
-	var lastErr error
 
-	for attempt := 0; attempt <= h.config.MaxRetries; attempt++ {
-		if attempt > 0 {
-			log.Printf("[重试] 第 %d 次重试 | Key: %s", attempt, keyDisplay)
-			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
-		}
-
-		log.Printf("[请求] 转发到上游 | Key: %s | 流式: %v | 尝试: %d/%d",
-			keyDisplay, isStream, attempt+1, h.config.MaxRetries+1)
-
-		upstreamURL := fmt.Sprintf("%s/v1/chat/completions", strings.TrimRight(h.config.UpstreamURL, "/"))
-		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
-		if err != nil {
-			lastErr = fmt.Errorf("构造上游请求失败: %v", err)
-			log.Printf("[错误] %v", lastErr)
-			continue
-		}
-
-		upReq.Header.Set("Content-Type", "application/json")
-		upReq.Header.Set("Authorization", authHeader)
-		upReq.Header.Set("Accept", "*/*")
-
-		resp, err := h.client.Do(upReq)
-		if err != nil {
-			lastErr = fmt.Errorf("上游请求失败: %v", err)
-			log.Printf("[错误] %v", lastErr)
-			continue
-		}
-
-		if resp.StatusCode == http.StatusTooManyRequests {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("上游返回 429 Too Many Requests")
-			log.Printf("[限流] Key %s 被限流，准备重试", keyDisplay)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("[上游] 返回状态码: %d", resp.StatusCode)
-			h.proxyRawResponse(w, resp)
-			return
-		}
-
-		if isStream {
-			h.handleStreamResponse(w, resp)
-		} else {
-			h.handleNonStreamResponse(w, resp)
-		}
+	upstreamURL := fmt.Sprintf("%s/v1/chat/completions", strings.TrimRight(h.config.UpstreamURL, "/"))
+	log.Printf("[请求] 转发到上游 %s | Key: %s | 流式: %v | Body大小: %d",
+		upstreamURL, keyDisplay, isStream, len(body))
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[错误] 构造上游请求失败: %v", err)
+		http.Error(w, `{"error": {"message": "Failed to create upstream request", "type": "server_error"}}`, http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("[错误] 所有重试均失败: %v", lastErr)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadGateway)
-	fmt.Fprintf(w, `{"error": {"message": "All retries failed: %s", "type": "upstream_error"}}`, lastErr)
+	upReq.Header.Set("Content-Type", "application/json")
+	upReq.Header.Set("Authorization", authHeader)
+	upReq.Header.Set("Accept", "*/*")
+
+	reqStart := time.Now()
+	resp, err := h.client.Do(upReq)
+	reqDuration := time.Since(reqStart)
+	if err != nil {
+		log.Printf("[错误] 上游请求失败 (耗时 %v): %v", reqDuration, err)
+		http.Error(w, fmt.Sprintf(`{"error": {"message": "Upstream request failed: %s", "type": "upstream_error"}}`, err), http.StatusBadGateway)
+		return
+	}
+	log.Printf("[响应] 上游返回 | 状态码: %d | 耗时: %v | Content-Type: %s",
+		resp.StatusCode, reqDuration, resp.Header.Get("Content-Type"))
+
+	// 429 直接透传
+	if resp.StatusCode == http.StatusTooManyRequests {
+		log.Printf("[限流] Key %s 被上游限流 429", keyDisplay)
+		h.proxyRawResponse(w, resp)
+		return
+	}
+
+	// 非200直接透传
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		log.Printf("[上游错误] 状态码: %d | 响应体: %s", resp.StatusCode, truncateForLog(string(errBody), 500))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(errBody)
+		return
+	}
+
+	// 读取响应体检测软限流
+	respBody, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		log.Printf("[错误] 读取上游响应体失败: %v", err)
+		http.Error(w, `{"error": {"message": "Failed to read upstream response", "type": "server_error"}}`, http.StatusBadGateway)
+		return
+	}
+
+	if isRateLimitBody(string(respBody)) {
+		log.Printf("[限流] Key %s 内容级限流，返回429 | 原始响应: %s", keyDisplay, truncateForLog(string(respBody), 200))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprintf(w, `{"error": {"message": "Rate limit exceeded (upstream soft limit)", "type": "rate_limit_error"}}`)
+		return
+	}
+
+	// 重建 resp.Body 供后续处理
+	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+
+	if isStream {
+		h.handleStreamResponse(w, resp)
+	} else {
+		h.handleNonStreamResponse(w, resp)
+	}
 }
 
 func (h *Handler) handleNonStreamResponse(w http.ResponseWriter, resp *http.Response) {
@@ -248,9 +265,12 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("[错误] 读取上游流失败: %v", err)
+	} else {
+		log.Printf("[警告] 流式响应异常结束，未收到 [DONE] 标记，缓冲区剩余 %d 个chunk", len(buffer))
 	}
 
 	if len(buffer) > 0 {
+		log.Printf("[清理] 刷新剩余缓冲区: %d 个chunk", len(buffer))
 		h.flushFilteredBuffer(w, flusher, buffer)
 	}
 }
@@ -329,13 +349,21 @@ func (h *Handler) flushFilteredBuffer(w http.ResponseWriter, flusher http.Flushe
 
 func (h *Handler) proxyRawResponse(w http.ResponseWriter, resp *http.Response) {
 	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[错误] 读取上游原始响应失败: %v", err)
+		http.Error(w, `{"error": {"message": "Failed to read upstream response", "type": "server_error"}}`, http.StatusBadGateway)
+		return
+	}
+	log.Printf("[转发] 原始响应 | 状态码: %d | 大小: %d | 内容: %s",
+		resp.StatusCode, len(body), truncateForLog(string(body), 500))
 	for key, values := range resp.Header {
 		for _, v := range values {
 			w.Header().Add(key, v)
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	w.Write(body)
 }
 
 func maskKey(authHeader string) string {
@@ -344,4 +372,28 @@ func maskKey(authHeader string) string {
 		return "***"
 	}
 	return key[:10] + "..." + key[len(key)-4:]
+}
+
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "...(truncated)"
+}
+
+// 软限流关键词，命中任一则判定为限流响应
+var rateLimitKeywords = []string{
+	"Ratelimit Exceeded",
+	"rate limit exceeded",
+	"Too many requests",
+}
+
+func isRateLimitBody(body string) bool {
+	lower := strings.ToLower(body)
+	for _, kw := range rateLimitKeywords {
+		if strings.Contains(lower, strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
 }
